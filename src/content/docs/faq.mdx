@@ -1,0 +1,275 @@
+---
+title: FAQ
+description: Frequently asked questions about Range
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import AccordionGroup from '../../components/AccordionGroup.astro';
+import Accordion from '../../components/Accordion.astro';
+
+## Verification Errors
+
+<AccordionGroup>
+  <Accordion title="Why am I getting 'CouldntVerifySignature'?">
+    This error means the Ed25519 signature verification failed. Common causes:
+
+    1. **Wrong signing key**: The keypair used to sign doesn't match `range_signer` in Settings
+    2. **Message modified**: The message was changed after signing
+    3. **Corrupted signature**: Signature bytes were altered in transit
+
+    **Solution**: Verify your backend is using the correct keypair:
+    ```typescript
+    // Check that this matches Settings.range_signer
+    console.log('Signing with:', rangeSignerKeypair.publicKey.toBase58());
+    ```
+  </Accordion>
+
+  <Accordion title="Why am I getting 'TimestampOutOfWindow'?">
+    The timestamp in the message is outside the allowed time window. This happens when:
+
+    1. **Signature expired**: Too much time passed between signing and verification
+    2. **Clock drift**: Backend and Solana clocks are out of sync
+    3. **window_size too small**: Not enough buffer for network latency
+
+    **Solutions**:
+    - Request a fresh signature and verify immediately
+    - Increase `window_size` in Settings (via `update_settings`)
+    - Ensure your backend server uses NTP for clock synchronization
+  </Accordion>
+
+  <Accordion title="Why am I getting 'WrongSigner'?">
+    The pubkey in the signed message doesn't match the transaction signer. This means:
+
+    1. **Wrong user**: You're trying to use someone else's signature
+    2. **Message error**: Backend signed with wrong pubkey in message
+
+    **Solution**: Ensure the message pubkey matches who's signing the transaction:
+    ```typescript
+    // Message format
+    const message = `${timestamp}_${transactionSigner.toBase58()}`;
+    //                              ^ Must match who signs the tx
+    ```
+  </Accordion>
+
+  <Accordion title="Why am I getting 'WrongMessageSplitLength'?">
+    The message format is incorrect. Expected format: `{timestamp}_{pubkey}`
+
+    **Common mistakes**:
+    - Missing underscore: `1704067200ABC123...`
+    - Extra underscores: `1704067200__ABC123...`
+    - Empty fields: `_ABC123...` or `1704067200_`
+
+    **Solution**: Check your message construction:
+    ```typescript
+    const message = `${timestamp}_${pubkey.toBase58()}`; // Single underscore
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Configuration
+
+<AccordionGroup>
+  <Accordion title="What window_size should I use?">
+    It depends on your use case:
+
+    | Use Case | Recommended | Rationale |
+    |----------|-------------|-----------|
+    | Normal operations | 60 seconds | Good balance |
+    | High security | 30 seconds | Smaller replay window |
+    | Slow networks | 120 seconds | More latency tolerance |
+
+    Start with 60 seconds and adjust based on `TimestampOutOfWindow` error rates.
+  </Accordion>
+
+  <Accordion title="Can I change range_signer after deployment?">
+    Yes, use `update_settings`:
+    ```typescript
+    const instruction = await buildUpdateSettingsInstruction({
+      admin: adminPublicKey,
+      rangeSigner: newSignerPublicKey,
+    });
+    ```
+
+    <Aside type="caution">
+    After updating, all existing signatures become invalid immediately. Coordinate with your backend.
+    </Aside>
+  </Accordion>
+
+  <Accordion title="Can multiple admins share one Settings account?">
+    No, each Settings account has exactly one admin. However, you can:
+
+    1. Transfer admin to a multi-sig (e.g., Squads)
+    2. Create separate Settings for each admin
+    3. Implement your own access control on top
+  </Accordion>
+</AccordionGroup>
+
+## Architecture
+
+<AccordionGroup>
+  <Accordion title="Do I need Range.org to use Range?">
+    No. Range.org is an optional compliance service. You can:
+
+    1. Use any compliance service
+    2. Implement your own compliance logic
+    3. Skip compliance entirely (just use Range for signature verification)
+
+    The Range program only verifies signatures - it doesn't know about Range.org.
+  </Accordion>
+
+  <Accordion title="What's the difference between verify_range and verify_range_with_callback?">
+    | Instruction | Use Case |
+    |-------------|----------|
+    | `verify_range` | Just verify, no follow-up action |
+    | `verify_range_with_callback` | Verify then call your program atomically |
+
+    Use callback when you need atomic operations - if your callback fails, the verification is also rolled back.
+  </Accordion>
+
+  <Accordion title="Can I call Range from my program (CPI)?">
+    Yes, see the [Build CPI Program](/guides/build-cpi-program) guide. Your program can:
+
+    1. Call `verify_range` via CPI to add verification to your instructions
+    2. Implement `on_verify` to receive callbacks from Range
+  </Accordion>
+
+  <Accordion title="What happens if my callback fails?">
+    The **entire transaction reverts**, including the Range verification. This is by design - it ensures atomicity. You can't have a "verified but action failed" state.
+  </Accordion>
+</AccordionGroup>
+
+## Development
+
+<AccordionGroup>
+  <Accordion title="How do I generate TypeScript/Rust clients?">
+    Use Codama to generate type-safe clients from the IDL:
+    ```bash
+    anchor build   # Generate IDL
+    npm run codama # Generate clients
+    ```
+
+    See [Client Setup (Codama)](/guides/codama-setup) for details.
+  </Accordion>
+
+  <Accordion title="Where can I find working code examples?">
+    The best reference is the test file: `tests/range.ts`
+
+    It includes examples of:
+    - Settings initialization
+    - Message signing
+    - Verification (success and failure cases)
+    - CPI patterns
+    - Error handling
+  </Accordion>
+
+  <Accordion title="How do I test locally?">
+    ```bash
+    git clone https://github.com/ZKLSOL/range.git
+    cd range
+    yarn install
+    anchor test
+    ```
+
+    See [Testing Locally](/guides/testing-locally) for details.
+  </Accordion>
+
+  <Accordion title="Is there a deployed program I can use?">
+    Range is currently pre-deployment. You'll need to deploy your own instance:
+    ```bash
+    anchor build
+    anchor deploy
+    ```
+
+    Save the program ID and update your clients accordingly.
+  </Accordion>
+</AccordionGroup>
+
+## Security
+
+<AccordionGroup>
+  <Accordion title="How do I protect my range_signer key?">
+    1. **Never** put it in client-side code
+    2. Use secure key management (AWS KMS, HashiCorp Vault)
+    3. Separate keys for devnet and mainnet
+    4. Have a key rotation procedure ready
+
+    See [Security](/security) for complete recommendations.
+  </Accordion>
+
+  <Accordion title="What if my range_signer key is compromised?">
+    1. **Immediately** call `update_settings` to rotate to a new key
+    2. Update your backend with the new signing key
+    3. Audit recent transactions for suspicious activity
+
+    Having a key rotation procedure documented beforehand is critical.
+  </Accordion>
+
+  <Accordion title="Can someone replay my signature?">
+    Only within the `window_size` period. After that, the timestamp check fails.
+
+    For extra protection:
+    - Keep `window_size` small
+    - Use on-chain nonces for high-value operations
+    - Track used signatures in your backend
+  </Accordion>
+
+  <Accordion title="How do I prevent direct calls to my on_verify callback?">
+    Always verify the CPI caller:
+    ```rust
+    let calling_ix = get_instruction_relative(-1, ix_sysvar)?;
+    require!(
+      calling_ix.program_id == RANGE_PROGRAM_ID,
+      ErrorCode::CpiOnly
+    );
+    ```
+
+    Without this check, attackers could bypass Range verification entirely.
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="My transaction keeps failing with 'account not found'">
+    Ensure all required accounts are provided:
+
+    1. **Settings PDA**: Derived from admin pubkey
+    2. **Instructions Sysvar**: `SYSVAR_INSTRUCTIONS_PUBKEY`
+    3. **For callbacks**: All `remaining_accounts` in correct order
+
+    ```typescript
+    const [settingsPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('settings'), adminPubkey.toBuffer()],
+      RANGE_PROGRAM_ID
+    );
+    ```
+  </Accordion>
+
+  <Accordion title="How do I debug verification failures?">
+    Check transaction logs:
+    ```typescript
+    const tx = await connection.getTransaction(signature, {
+      commitment: 'confirmed',
+    });
+    console.log('Logs:', tx?.meta?.logMessages);
+    ```
+
+    Common issues appear in logs as error messages.
+  </Accordion>
+
+  <Accordion title="The build is failing after updating Range">
+    Regenerate clients after any IDL changes:
+    ```bash
+    anchor build
+    npm run codama
+    ```
+
+    Then check if your code needs updates for any API changes.
+  </Accordion>
+</AccordionGroup>
+
+## Still Have Questions?
+
+- Check the [GitHub repository](https://github.com/ZKLSOL/range) for latest updates
+- Review the [test suite](https://github.com/ZKLSOL/range/blob/main/tests/range.ts) for working examples
+- Read the [Architecture](/reference/architecture) documentation for deeper understanding

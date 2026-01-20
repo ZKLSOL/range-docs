@@ -1,0 +1,166 @@
+---
+title: Events
+description: Events emitted by the Range program
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Range emits events to provide observability into verification operations. These events can be monitored for analytics, debugging, and audit trails.
+
+## VerificationSuccess
+
+Emitted when `verify_range` or `verify_range_with_callback` succeeds.
+
+### Structure
+
+```rust
+pub struct VerificationSuccess {
+    pub signer: Pubkey,
+    pub timestamp: i64,
+    pub signature: [u8; 64],
+    pub message: Vec<u8>,
+    pub clock_slot: u64,
+    pub clock_timestamp: i64,
+    pub settings_admin: Pubkey,
+}
+```
+
+### Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `signer` | `Pubkey` | The verified user's public key |
+| `timestamp` | `i64` | Timestamp from the signed message |
+| `signature` | `[u8; 64]` | The Ed25519 signature bytes |
+| `message` | `Vec<u8>` | The raw message bytes |
+| `clock_slot` | `u64` | Solana slot when verification occurred |
+| `clock_timestamp` | `i64` | On-chain Unix timestamp |
+| `settings_admin` | `Pubkey` | Admin of the Settings account used |
+
+### Example Event Data
+
+```json
+{
+  "signer": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+  "timestamp": 1704067200,
+  "signature": "base64_encoded_signature...",
+  "message": "1704067200_7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+  "clock_slot": 245678901,
+  "clock_timestamp": 1704067215,
+  "settings_admin": "AdminPubkeyHere..."
+}
+```
+
+## Listening for Events
+
+### Using Anchor Client
+
+```typescript
+import { Program } from '@coral-xyz/anchor';
+
+const program = new Program(idl, programId, provider);
+
+// Listen for events
+const listener = program.addEventListener('VerificationSuccess', (event, slot) => {
+  console.log('Verification succeeded:', {
+    signer: event.signer.toBase58(),
+    timestamp: event.timestamp.toNumber(),
+    clockSlot: event.clockSlot.toNumber(),
+    settingsAdmin: event.settingsAdmin.toBase58(),
+  });
+});
+
+// Later: remove listener
+program.removeEventListener(listener);
+```
+
+### Using Transaction Logs
+
+Events are also available in transaction logs. Parse the base64-encoded event data:
+
+```typescript
+import { Connection } from '@solana/web3.js';
+
+const connection = new Connection('https://api.devnet.solana.com');
+
+const tx = await connection.getTransaction(signature, {
+  commitment: 'confirmed',
+});
+
+// Parse logs for event data
+const logs = tx?.meta?.logMessages || [];
+const eventLog = logs.find(log => log.includes('VerificationSuccess'));
+```
+
+## Use Cases
+
+### Audit Trail
+
+Track all successful verifications for compliance:
+
+```typescript
+const verifications: VerificationRecord[] = [];
+
+program.addEventListener('VerificationSuccess', (event) => {
+  verifications.push({
+    signer: event.signer.toBase58(),
+    timestamp: new Date(event.timestamp.toNumber() * 1000),
+    verifiedAt: new Date(event.clockTimestamp.toNumber() * 1000),
+    slot: event.clockSlot.toNumber(),
+  });
+});
+```
+
+### Analytics
+
+Aggregate verification metrics:
+
+```typescript
+const metrics = {
+  totalVerifications: 0,
+  uniqueSigners: new Set<string>(),
+  byAdmin: new Map<string, number>(),
+};
+
+program.addEventListener('VerificationSuccess', (event) => {
+  metrics.totalVerifications++;
+  metrics.uniqueSigners.add(event.signer.toBase58());
+
+  const admin = event.settingsAdmin.toBase58();
+  metrics.byAdmin.set(admin, (metrics.byAdmin.get(admin) || 0) + 1);
+});
+```
+
+### Debugging
+
+Use events to debug verification issues:
+
+```typescript
+program.addEventListener('VerificationSuccess', (event) => {
+  const messageTimestamp = event.timestamp.toNumber();
+  const chainTimestamp = event.clockTimestamp.toNumber();
+  const drift = chainTimestamp - messageTimestamp;
+
+  console.log(`Timestamp drift: ${drift}s`);
+
+  if (drift > 30) {
+    console.warn('High timestamp drift detected');
+  }
+});
+```
+
+<Aside type="tip">
+The difference between `timestamp` (from message) and `clock_timestamp` (on-chain) shows clock drift. Monitor this to tune your `window_size`.
+</Aside>
+
+## Event Retention
+
+Events are stored in transaction logs, which are retained based on Solana's data retention policy:
+
+- **Recent transactions**: Available immediately via RPC
+- **Historical transactions**: May require archive nodes or indexing services
+
+For long-term event storage, consider:
+- Running your own indexer
+- Using services like Helius, QuickNode, or The Graph
+- Storing events in your own database as they occur

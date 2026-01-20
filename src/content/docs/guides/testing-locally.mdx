@@ -1,0 +1,344 @@
+---
+title: Testing Locally
+description: Set up local testing environment for Range integration
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+This guide walks you through setting up a local testing environment for Range, including running a local validator, deploying the program, and running tests.
+
+## Prerequisites
+
+- [Solana CLI](https://docs.solana.com/cli/install-solana-cli-tools) installed
+- [Anchor](https://www.anchor-lang.com/docs/installation) installed
+- [Node.js](https://nodejs.org/) 18+
+- Rust toolchain
+
+## Quick Start
+
+<Steps>
+
+1. **Clone the Repository**
+
+   ```bash
+   git clone https://github.com/ZKLSOL/range.git
+   cd range
+   ```
+
+2. **Install Dependencies**
+
+   ```bash
+   yarn install
+   ```
+
+3. **Build the Program**
+
+   ```bash
+   anchor build
+   ```
+
+4. **Run Tests**
+
+   ```bash
+   anchor test
+   ```
+
+</Steps>
+
+This runs a local validator, deploys Range, and executes the test suite.
+
+## Understanding the Test Suite
+
+The test file at `tests/range.ts` demonstrates all Range functionality:
+
+### Test Structure
+
+```typescript
+describe('range', () => {
+  // Setup
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
+
+  const program = anchor.workspace.Range;
+  const cpiProgram = anchor.workspace.Cpi;
+
+  // Keypairs
+  const admin = Keypair.generate();
+  const user = Keypair.generate();
+  const rangeSigner = Keypair.generate();
+
+  // Tests
+  it('initializes settings', async () => { /* ... */ });
+  it('verifies a valid signature', async () => { /* ... */ });
+  it('rejects expired signatures', async () => { /* ... */ });
+  // ...
+});
+```
+
+### Key Test Scenarios
+
+```typescript
+// 1. Initialize Settings
+it('initializes settings', async () => {
+  const [settingsPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('settings'), admin.publicKey.toBuffer()],
+    program.programId
+  );
+
+  await program.methods
+    .initializeSettings(rangeSigner.publicKey, new BN(60))
+    .accounts({
+      admin: admin.publicKey,
+      settings: settingsPda,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([admin])
+    .rpc();
+});
+
+// 2. Verify Valid Signature
+it('verifies a valid signature', async () => {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const message = `${timestamp}_${user.publicKey.toBase58()}`;
+  const messageBytes = Buffer.from(message);
+
+  const signature = nacl.sign.detached(
+    messageBytes,
+    rangeSigner.secretKey
+  );
+
+  await program.methods
+    .verifyRange(Array.from(signature), messageBytes)
+    .accounts({
+      signer: user.publicKey,
+      settings: settingsPda,
+      instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+    })
+    .signers([user])
+    .rpc();
+});
+
+// 3. Test Error Cases
+it('rejects expired signatures', async () => {
+  const oldTimestamp = Math.floor(Date.now() / 1000) - 120; // 2 minutes ago
+  const message = `${oldTimestamp}_${user.publicKey.toBase58()}`;
+
+  try {
+    await program.methods
+      .verifyRange(Array.from(signature), Buffer.from(message))
+      .accounts({ /* ... */ })
+      .signers([user])
+      .rpc();
+    assert.fail('Should have thrown');
+  } catch (err) {
+    expect(err.message).to.include('TimestampOutOfWindow');
+  }
+});
+```
+
+## Running Specific Tests
+
+```bash
+# Run all tests
+anchor test
+
+# Run specific test file
+anchor test -- --grep "initializes settings"
+
+# Run with verbose logging
+RUST_LOG=debug anchor test
+
+# Skip local validator (use existing one)
+anchor test --skip-local-validator
+```
+
+## Local Validator Setup
+
+### Start Validator Manually
+
+```bash
+# Start local validator
+solana-test-validator
+
+# In another terminal
+anchor deploy
+anchor test --skip-local-validator
+```
+
+### Validator with Logging
+
+```bash
+solana-test-validator --log
+```
+
+### Reset State
+
+```bash
+# Stop validator and clear ledger
+rm -rf test-ledger/
+solana-test-validator
+```
+
+## Writing Your Own Tests
+
+### Basic Test Template
+
+```typescript
+import * as anchor from '@coral-xyz/anchor';
+import { Program } from '@coral-xyz/anchor';
+import { Range } from '../target/types/range';
+import { Keypair, PublicKey, SYSVAR_INSTRUCTIONS_PUBKEY } from '@solana/web3.js';
+import nacl from 'tweetnacl';
+import { expect } from 'chai';
+
+describe('my range tests', () => {
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
+
+  const program = anchor.workspace.Range as Program<Range>;
+
+  // Test accounts
+  const admin = Keypair.generate();
+  const user = Keypair.generate();
+  const rangeSigner = Keypair.generate();
+
+  let settingsPda: PublicKey;
+
+  before(async () => {
+    // Airdrop SOL to test accounts
+    await provider.connection.requestAirdrop(admin.publicKey, 10e9);
+    await provider.connection.requestAirdrop(user.publicKey, 10e9);
+
+    // Wait for confirmation
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Derive Settings PDA
+    [settingsPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('settings'), admin.publicKey.toBuffer()],
+      program.programId
+    );
+
+    // Initialize settings
+    await program.methods
+      .initializeSettings(rangeSigner.publicKey, new anchor.BN(60))
+      .accounts({
+        admin: admin.publicKey,
+        settings: settingsPda,
+      })
+      .signers([admin])
+      .rpc();
+  });
+
+  it('should verify a valid signature', async () => {
+    const timestamp = Math.floor(Date.now() / 1000);
+    const message = `${timestamp}_${user.publicKey.toBase58()}`;
+    const signature = nacl.sign.detached(
+      Buffer.from(message),
+      rangeSigner.secretKey
+    );
+
+    await program.methods
+      .verifyRange(Array.from(signature), Buffer.from(message))
+      .accounts({
+        signer: user.publicKey,
+        settings: settingsPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+      })
+      .signers([user])
+      .rpc();
+  });
+});
+```
+
+### Testing Error Cases
+
+```typescript
+import { expect } from 'chai';
+
+it('should fail with wrong signer', async () => {
+  const wrongUser = Keypair.generate();
+  await provider.connection.requestAirdrop(wrongUser.publicKey, 1e9);
+
+  // Message signed for user, but wrongUser is signing the transaction
+  const message = `${timestamp}_${user.publicKey.toBase58()}`;
+  const signature = nacl.sign.detached(Buffer.from(message), rangeSigner.secretKey);
+
+  try {
+    await program.methods
+      .verifyRange(Array.from(signature), Buffer.from(message))
+      .accounts({
+        signer: wrongUser.publicKey, // Wrong signer!
+        settings: settingsPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+      })
+      .signers([wrongUser])
+      .rpc();
+
+    expect.fail('Should have thrown WrongSigner error');
+  } catch (err: any) {
+    expect(err.error.errorCode.code).to.equal('WrongSigner');
+  }
+});
+```
+
+### Testing Events
+
+```typescript
+it('should emit VerificationSuccess event', async () => {
+  const listener = program.addEventListener('VerificationSuccess', (event) => {
+    expect(event.signer.toBase58()).to.equal(user.publicKey.toBase58());
+    expect(event.timestamp.toNumber()).to.be.closeTo(timestamp, 5);
+  });
+
+  try {
+    await program.methods
+      .verifyRange(Array.from(signature), Buffer.from(message))
+      .accounts({ /* ... */ })
+      .signers([user])
+      .rpc();
+
+    // Give time for event to be received
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  } finally {
+    program.removeEventListener(listener);
+  }
+});
+```
+
+## Debugging Tips
+
+### Enable Logs
+
+```bash
+# Program logs
+RUST_LOG=solana_runtime::system_instruction_processor=trace,solana_runtime::message_processor=trace anchor test
+
+# All logs
+RUST_LOG=debug anchor test
+```
+
+### Print Transaction Details
+
+```typescript
+const tx = await program.methods
+  .verifyRange(Array.from(signature), Buffer.from(message))
+  .accounts({ /* ... */ })
+  .signers([user])
+  .rpc({ commitment: 'confirmed' });
+
+const txDetails = await provider.connection.getTransaction(tx, {
+  commitment: 'confirmed',
+});
+
+console.log('Logs:', txDetails?.meta?.logMessages);
+```
+
+<Aside type="tip">
+The `tests/range.ts` file in the repository is the authoritative reference for working examples. Start there when integrating Range.
+</Aside>
+
+## See Also
+
+- [Quick Start](/quick-start) - Basic usage guide
+- [Client Setup (Codama)](/guides/codama-setup) - Generate TypeScript client
+- [Architecture](/reference/architecture) - Understanding the verification flow

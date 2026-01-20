@@ -1,0 +1,179 @@
+---
+title: Architecture
+description: Understanding the Range verification flow and state machines
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Range is designed around a simple principle: verify backend-signed messages on-chain without requiring the backend to co-sign transactions.
+
+## Complete Verification Flow
+
+The full flow involves the user, backend, an optional compliance service (Range.org), and the Solana network:
+
+```mermaid
+sequenceDiagram
+    participant User as User (Client)
+    participant Backend as Backend (Server)
+    participant RangeOrg as Range.org API
+    participant Solana as Solana Network
+
+    User->>Backend: 1. Sign auth message (proves wallet ownership)
+    Backend->>RangeOrg: 2. Query pubkey for compliance
+    RangeOrg->>Backend: 3. Return PASS or FAIL
+    Backend->>Backend: 4. If PASS: sign "{timestamp}_{pubkey}"
+    Backend->>User: 5. Return {signature, message}
+    User->>Solana: 6. Submit tx with signature + message
+    Note over Solana: 7. On-chain verification
+    Solana->>User: 8. Transaction succeeds/fails
+```
+
+### Step-by-Step
+
+1. **User Authentication**: User signs a message with their wallet to prove ownership
+2. **Compliance Check**: Backend queries Range.org (or your compliance service) to verify the pubkey
+3. **Compliance Response**: Service returns PASS or FAIL
+4. **Message Signing**: If compliant, backend creates and signs `{timestamp}_{pubkey}`
+5. **Return to User**: Backend sends signature and message to user
+6. **Transaction Submission**: User includes signature in their Solana transaction
+7. **On-chain Verification**: Range program verifies signature, timestamp, and pubkey
+8. **Result**: Transaction succeeds or fails with specific error
+
+## Settings Account State Machine
+
+Each admin can create their own Settings account. The account lifecycle:
+
+```mermaid
+stateDiagram-v2
+    [*] --> NonExistent: Account doesn't exist
+    NonExistent --> Active: initialize_settings
+    Active --> Active: update_settings (same admin)
+    Active --> Active: transfer_admin (new admin)
+
+    state Active {
+        [*] --> Configured
+        Configured: bump: u8
+        Configured: admin: Pubkey
+        Configured: window_size: u64
+        Configured: range_signer: Pubkey
+    }
+```
+
+**Key Points:**
+- Any user can create their own Settings by calling `initialize_settings` as admin
+- Settings PDA derived from: `["settings", admin_pubkey]`
+- Only the current admin can update settings or transfer ownership
+- Transferring admin changes who controls the account but keeps the same PDA
+
+## Verification State Machine
+
+When `verify_range` or `verify_range_with_callback` is called:
+
+```mermaid
+flowchart TD
+    A[Start Verification] --> B{Ed25519 Signature Valid?}
+    B -->|No| E1[Error: CouldntVerifySignature]
+    B -->|Yes| C{Parse Message OK?}
+    C -->|No| E2[Error: TimestampParsingFailed / PubkeyParsingFailed]
+    C -->|Yes| D{Timestamp in Window?}
+    D -->|No| E3[Error: TimestampOutOfWindow]
+    D -->|Yes| F{Pubkey Matches Signer?}
+    F -->|No| E4[Error: WrongSigner]
+    F -->|Yes| G[Emit VerificationSuccess Event]
+    G --> H{Is Callback?}
+    H -->|No| I[Done - Success]
+    H -->|Yes| J[CPI to target program]
+    J --> K{Callback Succeeds?}
+    K -->|No| L[Full Transaction Revert]
+    K -->|Yes| M[Done - Success]
+```
+
+## CPI Patterns
+
+Range supports two CPI patterns:
+
+### Pattern A: External Program → Range
+
+Another program calls Range for verification:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant YourProgram as Your Program
+    participant Range as Range Program
+
+    User->>YourProgram: Call your_instruction
+    YourProgram->>Range: CPI: verify_range
+    Range->>Range: Verify signature
+    Range->>Range: Emit event
+    Range->>YourProgram: Return success
+    YourProgram->>User: Return success
+```
+
+### Pattern B: Range → Callback (Atomic)
+
+Range verifies then calls your program:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Range as Range Program
+    participant YourProgram as Your Program
+
+    User->>Range: verify_range_with_callback
+    Range->>Range: Verify signature
+    Range->>Range: Emit event
+    Range->>YourProgram: CPI: on_verify + cpi_data
+    YourProgram->>YourProgram: Verify caller is Range
+    YourProgram->>YourProgram: Execute callback logic
+    YourProgram->>Range: Return success
+    Range->>User: Return success
+```
+
+<Aside type="caution">
+If the callback fails, the **entire transaction reverts** including the verification. This ensures atomicity - you can't have a "verified" state without the callback completing.
+</Aside>
+
+## CPI-Only Enforcement
+
+The `on_verify` instruction in your program should only be callable via CPI from Range:
+
+```mermaid
+flowchart TD
+    A[on_verify called] --> B{Check instruction sysvar}
+    B --> C{Previous instruction from Range?}
+    C -->|No| D[Error: CpiOnly]
+    C -->|Yes| E[Proceed with logic]
+```
+
+This is enforced by checking the instruction sysvar to verify the previous instruction was from the Range program.
+
+## Account Structure
+
+### Settings Account
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `bump` | `u8` | PDA bump seed |
+| `admin` | `Pubkey` | Owner who can modify settings |
+| `window_size` | `u64` | Time window in seconds for timestamp validation |
+| `range_signer` | `Pubkey` | Public key of trusted backend signer |
+
+**PDA Seeds:** `["settings", admin.key()]`
+
+## Message Format
+
+The standard message format is:
+
+```
+{timestamp}_{pubkey}
+```
+
+- `timestamp`: Unix timestamp (seconds) when message was signed
+- `pubkey`: Base58-encoded public key of the user
+
+Example: `1704067200_7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU`
+
+<Aside type="tip">
+The message format can be extended for additional data. See the [Custom Messages](/guides/custom-messages) guide.
+</Aside>

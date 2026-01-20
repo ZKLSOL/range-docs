@@ -1,0 +1,132 @@
+---
+title: initialize_settings
+description: Create a new Settings account for Range verification
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Creates a new Settings account that stores verification configuration. The caller becomes the admin of the account.
+
+## Signature
+
+```rust
+pub fn initialize_settings(
+    ctx: Context<InitializeSettings>,
+    range_signer: Pubkey,
+    window_size: u64,
+) -> Result<()>
+```
+
+## Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `range_signer` | `Pubkey` | Public key of the trusted backend signer |
+| `window_size` | `u64` | Time window (seconds) for timestamp validation |
+
+## Accounts
+
+| Account | Type | Description |
+|---------|------|-------------|
+| `admin` | `Signer` | The admin who will own this Settings account |
+| `settings` | `Account<Settings>` | PDA to be initialized (derived from admin) |
+| `system_program` | `Program<System>` | System program for account creation |
+
+## PDA Derivation
+
+```typescript
+const [settingsPda] = PublicKey.findProgramAddressSync(
+  [Buffer.from("settings"), admin.toBuffer()],
+  RANGE_PROGRAM_ID
+);
+```
+
+## Usage
+
+### TypeScript
+
+```typescript
+import { buildInitializeSettingsInstruction } from './codama-ts-range-custom';
+
+const instruction = await buildInitializeSettingsInstruction({
+  admin: walletPublicKey,
+  rangeSigner: backendSignerPublicKey,
+  windowSize: 60n, // 60 seconds
+});
+
+// Sign and send transaction
+const transaction = new Transaction().add(instruction);
+await sendTransaction(transaction);
+```
+
+### Anchor
+
+```typescript
+await program.methods
+  .initializeSettings(rangeSigner, new BN(60))
+  .accounts({
+    admin: wallet.publicKey,
+    settings: settingsPda,
+    systemProgram: SystemProgram.programId,
+  })
+  .rpc();
+```
+
+## Behavior
+
+1. Derives Settings PDA from `["settings", admin.key()]`
+2. Creates the Settings account with initial values
+3. Sets caller as admin
+4. Stores provided `range_signer` and `window_size`
+
+## Errors
+
+| Error | Cause |
+|-------|-------|
+| Account already exists | Settings already initialized for this admin |
+| Insufficient funds | Admin doesn't have enough SOL for rent |
+
+<Aside type="note">
+Each admin can only have one Settings account since the PDA is derived from their pubkey. To use different configurations, use different admin accounts.
+</Aside>
+
+## Example
+
+```typescript
+import { Connection, Keypair, Transaction } from '@solana/web3.js';
+import { buildInitializeSettingsInstruction } from './codama-ts-range-custom';
+
+async function initializeSettings() {
+  const connection = new Connection('https://api.devnet.solana.com');
+
+  // Admin keypair (you)
+  const admin = Keypair.generate();
+
+  // Backend signer keypair (keep this secure on your backend)
+  const rangeSigner = Keypair.generate();
+
+  const instruction = await buildInitializeSettingsInstruction({
+    admin: admin.publicKey,
+    rangeSigner: rangeSigner.publicKey,
+    windowSize: 60n, // 60 second validity window
+  });
+
+  const transaction = new Transaction().add(instruction);
+  transaction.feePayer = admin.publicKey;
+  transaction.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+
+  transaction.sign(admin);
+  const signature = await connection.sendRawTransaction(transaction.serialize());
+
+  console.log('Settings initialized:', signature);
+  console.log('Save your range_signer private key securely!');
+
+  return { admin, rangeSigner };
+}
+```
+
+## See Also
+
+- [Settings Account](/reference/settings-account) - Understanding the Settings structure
+- [update_settings](/reference/instructions/update-settings) - Modifying settings
+- [transfer_admin](/reference/instructions/transfer-admin) - Transferring ownership

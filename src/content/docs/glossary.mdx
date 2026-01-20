@@ -1,0 +1,101 @@
+---
+title: Glossary
+description: Key terms and concepts used in Range documentation
+---
+
+## A
+
+### Admin
+The public key that owns and controls a Settings account. Only the admin can update settings or transfer ownership.
+
+### Anchor
+A framework for Solana smart contract development that simplifies account serialization, error handling, and testing.
+
+## C
+
+### Callback
+An instruction in your program that Range calls after successful verification when using `verify_range_with_callback`. The callback receives `cpi_data` and `remaining_accounts`.
+
+### CPI (Cross-Program Invocation)
+The mechanism by which one Solana program calls another. Range supports both being called via CPI and making CPI calls to other programs.
+
+### cpi_data
+Arbitrary bytes passed from `verify_range_with_callback` to your callback instruction. You define the format and meaning.
+
+## E
+
+### Ed25519
+The digital signature algorithm used by Solana and Range. Provides 128-bit security level for signature verification.
+
+### Event
+Data emitted by a Solana program during execution. Range emits `VerificationSuccess` events on successful verification.
+
+## I
+
+### IDL (Interface Definition Language)
+A JSON file describing a Solana program's instructions, accounts, and types. Used by Codama to generate type-safe clients.
+
+### Instructions Sysvar
+A special Solana account (`SysvarInstructions111111111111111111111`) that provides information about the current transaction's instructions. Used for CPI verification.
+
+## M
+
+### Message
+The data signed by the backend and verified on-chain. Default format: `{timestamp}_{pubkey}`. Can be extended with additional fields.
+
+## P
+
+### PDA (Program Derived Address)
+An address deterministically derived from seeds and a program ID. Cannot have a corresponding private key. Range Settings accounts are PDAs derived from `["settings", admin_pubkey]`.
+
+### Pubkey
+Short for "public key." A 32-byte identifier for accounts and signers on Solana, typically displayed in Base58 encoding.
+
+## R
+
+### range_signer
+The public key of the trusted backend signer stored in a Settings account. Only signatures from this key are accepted for verification.
+
+### remaining_accounts
+Additional accounts passed to `verify_range_with_callback` that are forwarded to your callback instruction. Access them by index in your `on_verify` handler.
+
+### Replay Attack
+An attack where a valid signature is reused after its intended use. Range mitigates this with timestamp validation within `window_size`.
+
+## S
+
+### Settings
+The account type that stores Range configuration: `bump`, `admin`, `window_size`, and `range_signer`. Each admin has their own Settings PDA.
+
+### Signature
+A 64-byte Ed25519 digital signature created by the backend and verified on-chain. Proves the message was signed by the `range_signer`.
+
+### Signer
+The account that signs a transaction. In Range verification, the transaction signer must match the pubkey in the signed message.
+
+## T
+
+### Timestamp
+Unix timestamp (seconds since epoch) included in the signed message. Must be within `window_size` of the current on-chain time.
+
+## V
+
+### VerificationSuccess
+Event emitted when `verify_range` or `verify_range_with_callback` succeeds. Contains `signer`, `timestamp`, `signature`, `message`, `clock_slot`, `clock_timestamp`, and `settings_admin`.
+
+### verify_range
+The core verification instruction. Verifies a backend-signed message without triggering a callback.
+
+### verify_range_with_callback
+Verification instruction that calls your program after successful verification. Enables atomic verification + action patterns.
+
+## W
+
+### window_size
+Configuration in Settings that determines how long (in seconds) a signature remains valid. Smaller values are more secure but less tolerant of latency.
+
+## See Also
+
+- [Architecture](/reference/architecture) - Visual explanation of concepts
+- [Quick Start](/quick-start) - Practical application of these concepts
+- [FAQ](/faq) - Common questions and answers

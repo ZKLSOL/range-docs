@@ -1,0 +1,328 @@
+---
+title: Custom Messages
+description: Extend the message format for advanced verification use cases
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The default Range message format is `{timestamp}_{pubkey}`. You can extend this format to include additional verified data that's checked on-chain.
+
+## Default Format
+
+```
+{timestamp}_{pubkey}
+```
+
+Example: `1704067200_7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU`
+
+## Extended Format
+
+Add additional fields separated by underscores:
+
+```
+{timestamp}_{pubkey}_{field1}_{field2}_{...}
+```
+
+Examples:
+- `1704067200_7xKXt..._1000` - Amount limit
+- `1704067200_7xKXt..._transfer_vault1` - Action and target
+- `1704067200_7xKXt..._kyc_2` - KYC level
+
+<Aside type="note">
+The on-chain program must be modified to parse and validate additional fields. The default Range program only validates timestamp and pubkey.
+</Aside>
+
+## Use Cases
+
+### Amount Limits
+
+Authorize transfers up to a specific amount:
+
+```typescript
+// Backend
+const maxAmount = 1000;
+const message = `${timestamp}_${pubkey}_${maxAmount}`;
+const signature = sign(message, rangeSignerKeypair);
+```
+
+```rust
+// On-chain
+fn verify_with_amount(
+    ctx: Context<VerifyWithAmount>,
+    signature: [u8; 64],
+    message: Vec<u8>,
+    requested_amount: u64,
+) -> Result<()> {
+    // Standard Range verification first
+    verify_range_signature(&ctx, &signature, &message)?;
+
+    // Parse extended message
+    let message_str = String::from_utf8(message)
+        .map_err(|_| ErrorCode::InvalidMessage)?;
+
+    let parts: Vec<&str> = message_str.split('_').collect();
+    require!(parts.len() >= 3, ErrorCode::InvalidMessageFormat);
+
+    // Extract and validate amount
+    let max_amount: u64 = parts[2].parse()
+        .map_err(|_| ErrorCode::InvalidAmount)?;
+
+    require!(
+        requested_amount <= max_amount,
+        ErrorCode::AmountExceedsLimit
+    );
+
+    // Proceed with transfer
+    Ok(())
+}
+```
+
+### Action Authorization
+
+Authorize specific actions:
+
+```typescript
+// Backend - only sign for allowed actions
+const allowedActions = ['deposit', 'withdraw', 'stake'];
+
+if (!allowedActions.includes(requestedAction)) {
+  return res.status(403).json({ error: 'Action not allowed' });
+}
+
+const message = `${timestamp}_${pubkey}_${requestedAction}`;
+```
+
+```rust
+// On-chain
+#[derive(PartialEq)]
+enum Action {
+    Deposit,
+    Withdraw,
+    Stake,
+}
+
+fn verify_action(
+    ctx: Context<VerifyAction>,
+    signature: [u8; 64],
+    message: Vec<u8>,
+    action: Action,
+) -> Result<()> {
+    verify_range_signature(&ctx, &signature, &message)?;
+
+    let message_str = String::from_utf8(message)?;
+    let parts: Vec<&str> = message_str.split('_').collect();
+
+    let signed_action = match parts.get(2) {
+        Some(&"deposit") => Action::Deposit,
+        Some(&"withdraw") => Action::Withdraw,
+        Some(&"stake") => Action::Stake,
+        _ => return Err(ErrorCode::InvalidAction.into()),
+    };
+
+    require!(signed_action == action, ErrorCode::ActionMismatch);
+
+    Ok(())
+}
+```
+
+### KYC Levels
+
+Different verification levels for different access:
+
+```typescript
+// Backend - determine KYC level from compliance check
+const kycLevel = await getKYCLevel(pubkey); // 0, 1, 2, 3
+
+const message = `${timestamp}_${pubkey}_kyc_${kycLevel}`;
+```
+
+```rust
+// On-chain
+fn verify_kyc_level(
+    ctx: Context<VerifyKYC>,
+    signature: [u8; 64],
+    message: Vec<u8>,
+    required_level: u8,
+) -> Result<()> {
+    verify_range_signature(&ctx, &signature, &message)?;
+
+    let message_str = String::from_utf8(message)?;
+    let parts: Vec<&str> = message_str.split('_').collect();
+
+    // Expect: timestamp_pubkey_kyc_level
+    require!(parts.len() >= 4, ErrorCode::InvalidMessageFormat);
+    require!(parts[2] == "kyc", ErrorCode::NotKYCMessage);
+
+    let user_level: u8 = parts[3].parse()
+        .map_err(|_| ErrorCode::InvalidKYCLevel)?;
+
+    require!(
+        user_level >= required_level,
+        ErrorCode::InsufficientKYCLevel
+    );
+
+    Ok(())
+}
+```
+
+### Multi-Parameter Messages
+
+Combine multiple fields:
+
+```typescript
+// Backend
+const message = `${timestamp}_${pubkey}_${action}_${amount}_${target}`;
+// Example: 1704067200_7xKXt..._transfer_1000_vault1
+```
+
+```rust
+// On-chain
+#[derive(Debug)]
+struct ParsedMessage {
+    timestamp: i64,
+    pubkey: Pubkey,
+    action: String,
+    amount: u64,
+    target: String,
+}
+
+fn parse_extended_message(message: &[u8]) -> Result<ParsedMessage> {
+    let message_str = String::from_utf8(message.to_vec())
+        .map_err(|_| ErrorCode::InvalidMessage)?;
+
+    let parts: Vec<&str> = message_str.split('_').collect();
+    require!(parts.len() == 5, ErrorCode::InvalidMessageFormat);
+
+    Ok(ParsedMessage {
+        timestamp: parts[0].parse().map_err(|_| ErrorCode::InvalidTimestamp)?,
+        pubkey: Pubkey::from_str(parts[1]).map_err(|_| ErrorCode::InvalidPubkey)?,
+        action: parts[2].to_string(),
+        amount: parts[3].parse().map_err(|_| ErrorCode::InvalidAmount)?,
+        target: parts[4].to_string(),
+    })
+}
+```
+
+## Implementation Pattern
+
+### 1. Define Your Format
+
+```typescript
+// types.ts
+interface ExtendedMessage {
+  timestamp: number;
+  pubkey: string;
+  action: 'transfer' | 'stake' | 'unstake';
+  amount?: number;
+  target?: string;
+}
+
+function encodeMessage(msg: ExtendedMessage): string {
+  const parts = [msg.timestamp, msg.pubkey, msg.action];
+  if (msg.amount !== undefined) parts.push(msg.amount.toString());
+  if (msg.target !== undefined) parts.push(msg.target);
+  return parts.join('_');
+}
+```
+
+### 2. Backend Signing
+
+```typescript
+app.post('/api/verify-extended', async (req, res) => {
+  const { pubkey, action, amount, target } = req.body;
+
+  // Validate action is allowed
+  if (!isActionAllowed(pubkey, action, amount)) {
+    return res.status(403).json({ error: 'Action not permitted' });
+  }
+
+  const message = encodeMessage({
+    timestamp: Math.floor(Date.now() / 1000),
+    pubkey,
+    action,
+    amount,
+    target,
+  });
+
+  const signature = sign(message, rangeSignerKeypair);
+
+  res.json({ signature, message });
+});
+```
+
+### 3. Client Usage
+
+```typescript
+async function verifyExtendedAction(
+  action: string,
+  amount: number,
+  target: string
+) {
+  // Get signed message from backend
+  const { signature, message } = await fetch('/api/verify-extended', {
+    method: 'POST',
+    body: JSON.stringify({ pubkey, action, amount, target }),
+  }).then(r => r.json());
+
+  // Build and send transaction
+  const instruction = await buildVerifyExtendedInstruction({
+    signer: publicKey,
+    admin: settingsAdmin,
+    signature: Buffer.from(signature, 'base64'),
+    message: Buffer.from(message),
+    action,
+    amount,
+    target,
+  });
+
+  await sendTransaction(new Transaction().add(instruction));
+}
+```
+
+## Security Considerations
+
+<Aside type="caution">
+When extending the message format, ensure:
+
+1. **All fields are validated on-chain** - Never trust fields without verification
+2. **Field order is fixed** - Parsing depends on consistent ordering
+3. **No underscore in values** - Use different delimiter if values might contain underscores
+4. **Length limits** - Message size affects transaction size
+</Aside>
+
+### Alternative Delimiters
+
+If your values might contain underscores:
+
+```typescript
+// Use | as delimiter
+const message = `${timestamp}|${pubkey}|${action}|${amount}`;
+```
+
+```rust
+let parts: Vec<&str> = message_str.split('|').collect();
+```
+
+### JSON Alternative
+
+For complex structured data:
+
+```typescript
+const payload = JSON.stringify({
+  timestamp,
+  pubkey,
+  action,
+  params: { amount, target, metadata: {...} },
+});
+const message = payload;
+```
+
+<Aside type="note">
+JSON parsing on-chain is expensive in compute units. Use simple delimited formats for production.
+</Aside>
+
+## See Also
+
+- [verify_range](/reference/instructions/verify-range) - Base verification instruction
+- [Rate Limiting](/guides/rate-limiting) - Action-specific rate limits
+- [Security](/security) - Security best practices

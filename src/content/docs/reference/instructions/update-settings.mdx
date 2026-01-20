@@ -1,0 +1,169 @@
+---
+title: update_settings
+description: Update window_size and/or range_signer in a Settings account
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Updates the configuration of an existing Settings account. Only the current admin can call this instruction.
+
+## Signature
+
+```rust
+pub fn update_settings(
+    ctx: Context<UpdateSettings>,
+    range_signer: Option<Pubkey>,
+    window_size: Option<u64>,
+) -> Result<()>
+```
+
+## Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `range_signer` | `Option<Pubkey>` | New trusted signer pubkey (optional) |
+| `window_size` | `Option<u64>` | New time window in seconds (optional) |
+
+<Aside type="tip">
+Both parameters are optional. Pass `null` or omit to keep the current value.
+</Aside>
+
+## Accounts
+
+| Account | Type | Description |
+|---------|------|-------------|
+| `admin` | `Signer` | Current admin of the Settings account |
+| `settings` | `Account<Settings>` | Settings PDA to update |
+
+## Usage
+
+### TypeScript
+
+```typescript
+import { buildUpdateSettingsInstruction } from './codama-ts-range-custom';
+
+// Update both values
+const instruction = await buildUpdateSettingsInstruction({
+  admin: walletPublicKey,
+  rangeSigner: newBackendPublicKey,
+  windowSize: 120n,
+});
+
+// Update only window_size
+const instruction2 = await buildUpdateSettingsInstruction({
+  admin: walletPublicKey,
+  windowSize: 90n,
+  // rangeSigner not provided - keeps current value
+});
+
+// Update only range_signer
+const instruction3 = await buildUpdateSettingsInstruction({
+  admin: walletPublicKey,
+  rangeSigner: newBackendPublicKey,
+  // windowSize not provided - keeps current value
+});
+```
+
+### Anchor
+
+```typescript
+await program.methods
+  .updateSettings(
+    newRangeSigner,     // Option<Pubkey>
+    new BN(120)         // Option<u64>
+  )
+  .accounts({
+    admin: wallet.publicKey,
+    settings: settingsPda,
+  })
+  .rpc();
+```
+
+## Behavior
+
+1. Verifies caller is the current admin
+2. If `range_signer` provided, updates to new value
+3. If `window_size` provided, updates to new value
+4. Values not provided remain unchanged
+
+## Errors
+
+| Error | Cause |
+|-------|-------|
+| Constraint violation | Caller is not the admin |
+| Account not found | Settings account doesn't exist |
+
+## Use Cases
+
+### Rotating Backend Keys
+
+If your backend signing key is compromised or you want to rotate keys:
+
+```typescript
+// Generate new backend keypair
+const newRangeSigner = Keypair.generate();
+
+const instruction = await buildUpdateSettingsInstruction({
+  admin: adminPublicKey,
+  rangeSigner: newRangeSigner.publicKey,
+});
+
+// After transaction confirms, update your backend to use newRangeSigner
+```
+
+<Aside type="caution">
+After updating `range_signer`, all existing signatures become invalid. Coordinate the update with your backend to avoid verification failures.
+</Aside>
+
+### Adjusting Time Window
+
+If you're seeing `TimestampOutOfWindow` errors due to network latency:
+
+```typescript
+const instruction = await buildUpdateSettingsInstruction({
+  admin: adminPublicKey,
+  windowSize: 120n, // Increase from 60 to 120 seconds
+});
+```
+
+### Emergency Key Rotation
+
+If you suspect key compromise, rotate immediately:
+
+```typescript
+async function emergencyKeyRotation(
+  admin: Keypair,
+  connection: Connection
+) {
+  // Generate new keypair
+  const newRangeSigner = Keypair.generate();
+
+  const instruction = await buildUpdateSettingsInstruction({
+    admin: admin.publicKey,
+    rangeSigner: newRangeSigner.publicKey,
+  });
+
+  // Use high priority for fast confirmation
+  const transaction = new Transaction().add(instruction);
+  transaction.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+  transaction.feePayer = admin.publicKey;
+  transaction.sign(admin);
+
+  const signature = await connection.sendRawTransaction(
+    transaction.serialize(),
+    { skipPreflight: false }
+  );
+
+  console.log('Key rotated:', signature);
+  console.log('New range_signer:', newRangeSigner.publicKey.toBase58());
+
+  // IMPORTANT: Immediately update backend with new keypair
+  return newRangeSigner;
+}
+```
+
+## See Also
+
+- [Settings Account](/reference/settings-account) - Understanding Settings
+- [initialize_settings](/reference/instructions/initialize-settings) - Creating Settings
+- [Security](/security) - Security best practices

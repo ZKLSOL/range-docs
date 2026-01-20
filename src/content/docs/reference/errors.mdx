@@ -1,0 +1,216 @@
+---
+title: Errors
+description: Error codes returned by the Range program
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Range returns specific error codes to help you diagnose verification failures. Each error indicates exactly what check failed.
+
+## Range Program Errors
+
+### TimestampParsingFailed
+
+**Code:** `6000`
+
+The timestamp in the message could not be parsed as a valid integer.
+
+**Causes:**
+- Message format is incorrect
+- Timestamp contains non-numeric characters
+- Message was corrupted in transit
+
+**Solution:**
+```typescript
+// Ensure timestamp is a valid Unix timestamp
+const timestamp = Math.floor(Date.now() / 1000);
+const message = `${timestamp}_${pubkey}`; // Correct format
+```
+
+---
+
+### PubkeyParsingFailed
+
+**Code:** `6001`
+
+The pubkey in the message could not be parsed as a valid Solana public key.
+
+**Causes:**
+- Pubkey is not valid Base58
+- Pubkey is the wrong length
+- Message format is incorrect
+
+**Solution:**
+```typescript
+// Ensure pubkey is Base58 encoded
+const message = `${timestamp}_${pubkey.toBase58()}`; // Use toBase58()
+```
+
+---
+
+### WrongMessageSplitLength
+
+**Code:** `6002`
+
+The message does not have the expected format `{timestamp}_{pubkey}`.
+
+**Causes:**
+- Missing underscore separator
+- Multiple underscores in message
+- Empty timestamp or pubkey
+
+**Solution:**
+```typescript
+// Correct format: single underscore separator
+const message = `${timestamp}_${pubkey}`; // One underscore only
+```
+
+---
+
+### WrongSigner
+
+**Code:** `6003`
+
+The pubkey in the message does not match the transaction signer.
+
+**Causes:**
+- User submitted a signature meant for a different pubkey
+- Message was created with wrong pubkey
+- Attempting to use someone else's signature
+
+**Solution:**
+```typescript
+// Ensure message pubkey matches transaction signer
+const message = `${timestamp}_${transactionSigner.toBase58()}`;
+
+// When verifying, signer must match
+const instruction = await buildVerifyRangeInstruction({
+  signer: transactionSigner, // Must match pubkey in message
+  // ...
+});
+```
+
+<Aside type="caution">
+This error prevents "signature theft" - using someone else's backend signature for your own transactions.
+</Aside>
+
+---
+
+### TimestampOutOfWindow
+
+**Code:** `6004`
+
+The message timestamp is outside the allowed time window.
+
+**Causes:**
+- Signature has expired (too old)
+- Signature is from the future (clock drift)
+- `window_size` is too small for network latency
+
+**Solution:**
+```typescript
+// Check your timestamps
+const messageTimestamp = 1704067200;
+const currentTime = Math.floor(Date.now() / 1000);
+const windowSize = 60; // from Settings
+
+// Must satisfy: currentTime - windowSize <= messageTimestamp <= currentTime + windowSize
+if (Math.abs(currentTime - messageTimestamp) > windowSize) {
+  console.error('Signature expired, request a new one');
+}
+```
+
+<Aside type="tip">
+If you see this error frequently, consider increasing `window_size` in your Settings account. But keep it as small as practical for security.
+</Aside>
+
+---
+
+### CouldntVerifySignature
+
+**Code:** `6005`
+
+The Ed25519 signature verification failed.
+
+**Causes:**
+- Signature was created with wrong private key
+- Message was modified after signing
+- Signature bytes are corrupted
+- `range_signer` in Settings doesn't match signing key
+
+**Solution:**
+```typescript
+// Ensure you're signing with the correct keypair
+const signature = nacl.sign.detached(
+  Buffer.from(message),
+  rangeSignerKeypair.secretKey // Must match Settings.range_signer
+);
+
+// Verify locally before submitting
+const isValid = nacl.sign.detached.verify(
+  Buffer.from(message),
+  signature,
+  rangeSignerKeypair.publicKey
+);
+```
+
+## CPI Program Errors
+
+### CpiOnly
+
+**Code:** `6000` (CPI program)
+
+The `on_verify` instruction was called directly instead of via CPI from Range.
+
+**Causes:**
+- Attempting to call `on_verify` without going through Range verification
+- Bypassing the verification step
+
+**Solution:**
+This instruction is designed to only be called by Range's `verify_range_with_callback`. Use the callback pattern:
+
+```typescript
+const instruction = await buildVerifyRangeWithCallbackInstruction({
+  // Range will CPI to your program's on_verify
+  targetProgram: yourProgramId,
+  // ...
+});
+```
+
+## Error Handling Example
+
+```typescript
+import { SendTransactionError } from '@solana/web3.js';
+
+try {
+  await sendTransaction(transaction);
+} catch (error) {
+  if (error instanceof SendTransactionError) {
+    const logs = error.logs || [];
+
+    if (logs.some(log => log.includes('TimestampOutOfWindow'))) {
+      // Signature expired - request a new one
+      const newSignature = await requestNewSignature();
+      // Retry with new signature
+    } else if (logs.some(log => log.includes('CouldntVerifySignature'))) {
+      // Signature invalid - check range_signer configuration
+      console.error('Backend signing key mismatch');
+    } else if (logs.some(log => log.includes('WrongSigner'))) {
+      // Pubkey mismatch - verify you're using your own signature
+      console.error('Cannot use signature from different user');
+    }
+  }
+}
+```
+
+## Error Summary Table
+
+| Error | Code | Quick Fix |
+|-------|------|-----------|
+| `TimestampParsingFailed` | 6000 | Check message format: `{timestamp}_{pubkey}` |
+| `PubkeyParsingFailed` | 6001 | Use `pubkey.toBase58()` |
+| `WrongMessageSplitLength` | 6002 | Single underscore separator only |
+| `WrongSigner` | 6003 | Message pubkey must match tx signer |
+| `TimestampOutOfWindow` | 6004 | Request fresh signature, check clock sync |
+| `CouldntVerifySignature` | 6005 | Verify `range_signer` matches signing key |
+| `CpiOnly` (CPI program) | 6000 | Use `verify_range_with_callback` |
